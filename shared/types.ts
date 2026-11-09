@@ -88,3 +88,14 @@ export interface ConditionsLookupResult {
     barometricPressureInHg: number | null;
   } | null;
 }
+
+export interface AuthUserInfo {
+  email: string;
+  name: string;
+  picture?: string;
+}
+
+export interface AuthConfigResponse {
+  authRequired: boolean;
+  googleClientId: string | null;
+}

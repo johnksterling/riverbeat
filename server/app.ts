@@ -7,6 +7,14 @@ import { fileURLToPath } from 'node:url';
 import type { DatabaseSync } from 'node:sqlite';
 import { UPLOADS_DIR, ensureDirectories } from './db.ts';
 import {
+  type AuthConfig,
+  createAuthMiddleware,
+  getAuthConfigFromEnv,
+  signSessionToken,
+  verifyGoogleIdToken,
+  verifySessionToken,
+} from './auth.ts';
+import {
   fetchTruckeeWatershedFlows,
   fetchUsgsSiteData,
   fetchWeatherConditions,
@@ -51,11 +59,87 @@ const upload = multer({
   },
 });
 
-export function createApp(db: DatabaseSync) {
+export function createApp(db: DatabaseSync, customAuthConfig?: AuthConfig) {
+  const authConfig = customAuthConfig ?? getAuthConfigFromEnv();
+  const requireAuth = createAuthMiddleware(authConfig);
+
   const app = express();
   app.use(cors());
   app.use(express.json({ limit: '10mb' }));
-  app.use('/uploads', express.static(UPLOADS_DIR));
+
+  // ==================== AUTHENTICATION ====================
+
+  app.get('/api/auth/config', (_req, res) => {
+    res.json({
+      authRequired: Boolean(authConfig.googleClientId),
+      googleClientId: authConfig.googleClientId || null,
+    });
+  });
+
+  app.get('/api/auth/me', (req, res) => {
+    if (!authConfig.googleClientId) {
+      res.json({ user: null, authRequired: false });
+      return;
+    }
+    const authHeader = req.headers.authorization;
+    const token =
+      authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    const user = verifySessionToken(token, authConfig.sessionSecret);
+    if (!user) {
+      res.status(401).json({ error: 'Not signed in' });
+      return;
+    }
+    if (
+      authConfig.allowedEmails.size > 0 &&
+      !authConfig.allowedEmails.has(user.email.toLowerCase())
+    ) {
+      res.status(403).json({ error: `Access denied for ${user.email}` });
+      return;
+    }
+    res.json({
+      user: { email: user.email, name: user.name, picture: user.picture },
+      authRequired: true,
+    });
+  });
+
+  app.post('/api/auth/google', async (req, res) => {
+    if (!authConfig.googleClientId) {
+      res.status(400).json({ error: 'Google Sign-In is not configured on this server' });
+      return;
+    }
+    const credential = String(req.body?.credential ?? '').trim();
+    if (!credential) {
+      res.status(400).json({ error: 'Missing Google credential token' });
+      return;
+    }
+
+    try {
+      const profile = await verifyGoogleIdToken(credential, authConfig.googleClientId);
+      if (
+        authConfig.allowedEmails.size > 0 &&
+        !authConfig.allowedEmails.has(profile.email.toLowerCase())
+      ) {
+        res.status(403).json({
+          error: `Access denied: ${profile.email} is not authorized to access this RiverBeat logbook.`,
+        });
+        return;
+      }
+
+      const token = signSessionToken(profile, authConfig.sessionSecret, 30);
+      res.json({
+        token,
+        user: profile,
+      });
+    } catch (err) {
+      res.status(401).json({
+        error: err instanceof Error ? err.message : 'Google Sign-In verification failed',
+      });
+    }
+  });
+
+  // Protect all subsequent /api/* routes and /uploads/* when GOOGLE_CLIENT_ID is set
+  app.use('/api', requireAuth);
+  app.use('/uploads', requireAuth, express.static(UPLOADS_DIR));
 
   // Helper to hydrate trips with catches and images
   function hydrateTrips(rawTrips: Array<Record<string, unknown>>): Trip[] {

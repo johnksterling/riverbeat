@@ -13,6 +13,7 @@ import {
   Fish,
   Gauge,
   Loader2,
+  LogOut,
   Map as MapIcon,
   MapPin,
   Plus,
@@ -26,12 +27,13 @@ import {
   Wind,
   X,
 } from 'lucide-react';
-import type { Location, Trip, USGSGaugeInfo } from '../shared/types.ts';
-import { api } from './api.ts';
+import type { AuthUserInfo, Location, Trip, USGSGaugeInfo } from '../shared/types.ts';
+import { api, getAuthenticatedMediaUrl } from './api.ts';
 import { StarRating } from './components/StarRating.tsx';
 import { LeafletMap } from './components/LeafletMap.tsx';
 import { LocationModal } from './components/LocationModal.tsx';
 import { TripModal } from './components/TripModal.tsx';
+import { GoogleSignInGate } from './components/GoogleSignInGate.tsx';
 
 type ActiveTab = 'trips' | 'locations' | 'map' | 'insights';
 
@@ -47,7 +49,18 @@ function formatTripDate(iso: string): string {
 }
 
 export function App() {
-  const [activeTab, setActiveTab] = useState<ActiveTab>('trips');
+  const [authChecking, setAuthChecking] = useState(true);
+  const [authRequired, setAuthRequired] = useState(false);
+  const [googleClientId, setGoogleClientId] = useState<string | null>(null);
+  const [currentUser, setCurrentUser] = useState<AuthUserInfo | null>(null);
+
+  const [activeTab, setActiveTab] = useState<ActiveTab>(() => {
+    const param = new URLSearchParams(window.location.search).get('tab');
+    if (param === 'locations' || param === 'map' || param === 'insights' || param === 'trips') {
+      return param;
+    }
+    return 'trips';
+  });
   const [locations, setLocations] = useState<Location[]>([]);
   const [trips, setTrips] = useState<Trip[]>([]);
   const [loading, setLoading] = useState(true);
@@ -117,12 +130,40 @@ export function App() {
   }, [searchQuery, filterLocationId, filterMinScore]);
 
   useEffect(() => {
-    loadAll();
-  }, [loadAll]);
+    let active = true;
+    (async () => {
+      try {
+        const cfg = await api.getAuthConfig();
+        if (!active) return;
+        setAuthRequired(cfg.authRequired);
+        setGoogleClientId(cfg.googleClientId);
+        if (cfg.authRequired) {
+          const me = await api.getMe().catch(() => ({ user: null, authRequired: true }));
+          if (!active) return;
+          setCurrentUser(me.user);
+        }
+      } catch {
+        // default to local mode if unreachable
+      } finally {
+        if (active) setAuthChecking(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
+    if (authChecking) return;
+    if (authRequired && !currentUser) return;
+    loadAll();
+  }, [loadAll, authChecking, authRequired, currentUser]);
+
+  useEffect(() => {
+    if (authChecking) return;
+    if (authRequired && !currentUser) return;
     loadTruckeeWatershed();
-  }, [loadTruckeeWatershed]);
+  }, [loadTruckeeWatershed, authChecking, authRequired, currentUser]);
 
   const handleCheckLiveFlow = async (siteNo: string) => {
     if (!siteNo) return;
@@ -221,6 +262,24 @@ export function App() {
       topRigs,
     };
   }, [trips]);
+
+  if (authChecking) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-950 text-white gap-2">
+        <Loader2 className="w-5 h-5 animate-spin text-teal-400" />
+        <span className="text-sm font-medium">Loading RiverBeat...</span>
+      </div>
+    );
+  }
+
+  if (authRequired && !currentUser && googleClientId) {
+    return (
+      <GoogleSignInGate
+        googleClientId={googleClientId}
+        onSignedIn={(user) => setCurrentUser(user)}
+      />
+    );
+  }
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900">
@@ -325,6 +384,20 @@ export function App() {
                 <Plus className="w-4 h-4 stroke-[2.5]" />
                 Log Session
               </button>
+              {authRequired && currentUser && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    api.signOut();
+                    setCurrentUser(null);
+                  }}
+                  title={`Signed in as ${currentUser.email} — Click to sign out`}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-2 rounded-xl text-xs font-medium bg-white/10 hover:bg-white/20 text-sky-100 border border-white/10 transition-colors cursor-pointer"
+                >
+                  <LogOut className="w-4 h-4" />
+                  <span className="hidden md:inline">Sign Out</span>
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -735,11 +808,11 @@ export function App() {
                               <button
                                 key={img.id}
                                 type="button"
-                                onClick={() => setLightboxUrl(img.url)}
+                                onClick={() => setLightboxUrl(getAuthenticatedMediaUrl(img.url))}
                                 className="w-24 h-20 rounded-xl overflow-hidden border border-slate-200 hover:ring-2 hover:ring-sky-500 transition-all cursor-pointer"
                               >
                                 <img
-                                  src={img.url}
+                                  src={getAuthenticatedMediaUrl(img.url)}
                                   alt={img.caption || trip.description}
                                   className="w-full h-full object-cover"
                                 />

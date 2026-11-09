@@ -13,7 +13,7 @@ import {
   X,
 } from 'lucide-react';
 import type { CatchEntry, Location, Trip, TripImage } from '../../shared/types.ts';
-import { api } from '../api.ts';
+import { api, getAuthenticatedMediaUrl } from '../api.ts';
 import { StarRating } from './StarRating.tsx';
 
 const TRUCKEE_RIG_TYPES = [
@@ -787,7 +787,7 @@ export const TripModal: React.FC<TripModalProps> = ({
                     key={img.id}
                     className="relative group w-20 h-20 rounded-lg overflow-hidden border border-slate-200 bg-slate-100"
                   >
-                    <img src={img.url} alt="" className="w-full h-full object-cover" />
+                    <img src={getAuthenticatedMediaUrl(img.url)} alt="" className="w-full h-full object-cover" />
                     <button
                       type="button"
                       onClick={() => handleDeleteExistingImage(img.id)}

@@ -4,7 +4,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-export const DATA_DIR = path.resolve(__dirname, '../data');
+export const DATA_DIR = process.env.DATA_DIR
+  ? path.resolve(process.env.DATA_DIR)
+  : path.resolve(__dirname, '../data');
 export const UPLOADS_DIR = path.resolve(DATA_DIR, 'uploads');
 
 export function ensureDirectories() {

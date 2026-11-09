@@ -1,14 +1,16 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { initDatabase } from './db.ts';
 import { createApp } from './app.ts';
+import { type AuthConfig, signSessionToken } from './auth.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import type { Server } from 'node:http';
 
 async function withServer(
   db: DatabaseSync,
-  fn: (baseUrl: string) => Promise<void>
+  fn: (baseUrl: string) => Promise<void>,
+  authConfig?: AuthConfig
 ): Promise<void> {
-  const app = createApp(db);
+  const app = createApp(db, authConfig);
   const server: Server = await new Promise((resolve) => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
@@ -161,5 +163,50 @@ describe('RiverBeat API & SQLite Database', () => {
       const missingTrip = await fetch(`${baseUrl}/api/trips/9999`);
       expect(missingTrip.status).toBe(404);
     });
+  });
+
+  it('enforces Google Sign-In and ALLOWED_EMAILS when GOOGLE_CLIENT_ID is configured', async () => {
+    const authConfig: AuthConfig = {
+      googleClientId: 'test-client-id.apps.googleusercontent.com',
+      allowedEmails: new Set(['angler@truckee.org']),
+      sessionSecret: 'unit-test-secret-key',
+    };
+
+    await withServer(
+      db,
+      async (baseUrl) => {
+        // 1. Public /api/auth/config works without token
+        const cfgRes = await fetch(`${baseUrl}/api/auth/config`);
+        expect(cfgRes.status).toBe(200);
+        const cfg = await cfgRes.json();
+        expect(cfg.authRequired).toBe(true);
+        expect(cfg.googleClientId).toBe('test-client-id.apps.googleusercontent.com');
+
+        // 2. Unauthenticated request to /api/locations returns 401
+        const unauthRes = await fetch(`${baseUrl}/api/locations`);
+        expect(unauthRes.status).toBe(401);
+
+        // 3. Authenticated request with non-allowed email returns 403
+        const unauthorizedToken = signSessionToken(
+          { email: 'stranger@example.com', name: 'Stranger' },
+          authConfig.sessionSecret
+        );
+        const forbiddenRes = await fetch(`${baseUrl}/api/locations`, {
+          headers: { Authorization: `Bearer ${unauthorizedToken}` },
+        });
+        expect(forbiddenRes.status).toBe(403);
+
+        // 4. Authenticated request with allowed email succeeds (200)
+        const validToken = signSessionToken(
+          { email: 'angler@truckee.org', name: 'Truckee Angler' },
+          authConfig.sessionSecret
+        );
+        const okRes = await fetch(`${baseUrl}/api/locations`, {
+          headers: { Authorization: `Bearer ${validToken}` },
+        });
+        expect(okRes.status).toBe(200);
+      },
+      authConfig
+    );
   });
 });
