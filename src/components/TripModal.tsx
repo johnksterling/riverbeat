@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Bug,
   Camera,
+  Clock,
   Fish,
   Loader2,
   MapPin,
@@ -13,7 +14,9 @@ import {
   X,
 } from 'lucide-react';
 import type { CatchEntry, Location, Trip, TripImage } from '../../shared/types.ts';
+import { findNearestLocation, formatDuration } from '../../shared/photoSessions.ts';
 import { api, getAuthenticatedMediaUrl } from '../api.ts';
+import { extractPhotosMeta } from '../utils/exif.ts';
 import { StarRating } from './StarRating.tsx';
 
 const TRUCKEE_RIG_TYPES = [
@@ -47,8 +50,17 @@ const WATER_CLARITY_OPTIONS = [
   'High & Off-Color',
 ];
 
+export interface TripPrefillDraft {
+  description?: string;
+  tripDate?: string;
+  durationMinutes?: number | null;
+  locationId?: number | null;
+  autoLookupOnMount?: boolean;
+}
+
 interface TripModalProps {
   initialTrip?: Trip | null;
+  prefillDraft?: TripPrefillDraft | null;
   locations: Location[];
   preselectedLocationId?: number | null;
   onClose: () => void;
@@ -64,18 +76,34 @@ function defaultDateTimeLocal(): string {
 
 export const TripModal: React.FC<TripModalProps> = ({
   initialTrip,
+  prefillDraft,
   locations,
   preselectedLocationId,
   onClose,
   onSaved,
   onRequestNewLocation,
 }) => {
-  const [description, setDescription] = useState(initialTrip?.description ?? '');
+  const [description, setDescription] = useState(
+    initialTrip?.description ?? prefillDraft?.description ?? ''
+  );
   const [tripDate, setTripDate] = useState(
-    initialTrip?.trip_date ? initialTrip.trip_date.slice(0, 16) : defaultDateTimeLocal()
+    initialTrip?.trip_date
+      ? initialTrip.trip_date.slice(0, 16)
+      : prefillDraft?.tripDate ?? defaultDateTimeLocal()
+  );
+  const [durationMinutes, setDurationMinutes] = useState<string>(
+    initialTrip?.duration_minutes !== null && initialTrip?.duration_minutes !== undefined
+      ? String(initialTrip.duration_minutes)
+      : prefillDraft?.durationMinutes !== null && prefillDraft?.durationMinutes !== undefined
+        ? String(prefillDraft.durationMinutes)
+        : ''
   );
   const [locationId, setLocationId] = useState<number>(
-    initialTrip?.location_id ?? preselectedLocationId ?? locations[0]?.id ?? 0
+    initialTrip?.location_id ??
+      prefillDraft?.locationId ??
+      preselectedLocationId ??
+      locations[0]?.id ??
+      0
   );
   const [score, setScore] = useState<number>(initialTrip?.score ?? 4);
   const [comments, setComments] = useState(initialTrip?.comments ?? '');
@@ -129,8 +157,15 @@ export const TripModal: React.FC<TripModalProps> = ({
 
   const [fetchingConditions, setFetchingConditions] = useState(false);
   const [conditionsStatus, setConditionsStatus] = useState('');
+  const [photoExifHint, setPhotoExifHint] = useState<{
+    takenAt: string | null;
+    lat: number | null;
+    lng: number | null;
+    matchedLocation: Location | null;
+  } | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const autoLookedUpRef = useRef(false);
 
   const selectedLocation = locations.find((l) => l.id === Number(locationId));
   const numericWaterTemp = waterTempF !== '' ? Number(waterTempF) : null;
@@ -209,6 +244,13 @@ export const TripModal: React.FC<TripModalProps> = ({
     }
   };
 
+  useEffect(() => {
+    if (prefillDraft?.autoLookupOnMount && !autoLookedUpRef.current && locationId) {
+      autoLookedUpRef.current = true;
+      void handleAutoFillConditions();
+    }
+  }, [prefillDraft?.autoLookupOnMount, locationId]);
+
   const addCatchRow = () => {
     setCatches((prev) => [
       ...prev,
@@ -258,6 +300,7 @@ export const TripModal: React.FC<TripModalProps> = ({
       const payload: Partial<Trip> = {
         description: description.trim(),
         trip_date: tripDate,
+        duration_minutes: durationMinutes !== '' ? Math.max(0, Math.round(Number(durationMinutes))) : null,
         location_id: Number(locationId),
         score,
         comments: comments.trim(),
@@ -347,13 +390,31 @@ export const TripModal: React.FC<TripModalProps> = ({
               <label className="block text-xs font-semibold uppercase tracking-wider text-slate-600 mb-1">
                 Date &amp; Time *
               </label>
-              <input
-                type="datetime-local"
-                required
-                value={tripDate}
-                onChange={(e) => setTripDate(e.target.value)}
-                className="w-full rounded-lg border border-slate-300 px-3.5 py-2 text-sm focus:border-sky-500 focus:ring-2 focus:ring-sky-200 outline-none"
-              />
+              <div className="flex gap-2">
+                <input
+                  type="datetime-local"
+                  required
+                  value={tripDate}
+                  onChange={(e) => setTripDate(e.target.value)}
+                  className="flex-1 min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-sky-500 focus:ring-2 focus:ring-sky-200 outline-none"
+                />
+                <div className="relative w-28 shrink-0" title="Session duration in minutes">
+                  <Clock className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  <input
+                    type="number"
+                    min={0}
+                    value={durationMinutes}
+                    onChange={(e) => setDurationMinutes(e.target.value)}
+                    placeholder="Mins"
+                    className="w-full rounded-lg border border-slate-300 pl-7 pr-2 py-2 text-sm focus:border-sky-500 focus:ring-2 focus:ring-sky-200 outline-none"
+                  />
+                </div>
+              </div>
+              {durationMinutes && Number(durationMinutes) > 0 && (
+                <div className="text-[11px] text-teal-700 font-medium mt-1">
+                  Duration: {formatDuration(Number(durationMinutes))}
+                </div>
+              )}
             </div>
 
             <div>
@@ -771,14 +832,79 @@ export const TripModal: React.FC<TripModalProps> = ({
                   accept="image/*"
                   multiple
                   className="hidden"
-                  onChange={(e) => {
-                    if (e.target.files) {
-                      setPendingFiles((prev) => [...prev, ...Array.from(e.target.files!)]);
+                  onChange={async (e) => {
+                    if (e.target.files && e.target.files.length > 0) {
+                      const filesArr = Array.from(e.target.files);
+                      setPendingFiles((prev) => [...prev, ...filesArr]);
+                      try {
+                        const extracted = await extractPhotosMeta(filesArr);
+                        const withExif =
+                          extracted.find((p) => p.meta.dateSource === 'exif' || p.meta.lat !== null) ??
+                          extracted[0];
+                        if (withExif && (withExif.meta.takenAt || withExif.meta.lat !== null)) {
+                          const matched =
+                            withExif.meta.lat !== null && withExif.meta.lng !== null
+                              ? findNearestLocation(
+                                  withExif.meta.lat,
+                                  withExif.meta.lng,
+                                  locations,
+                                  10
+                                )?.location ?? null
+                              : null;
+                          setPhotoExifHint({
+                            takenAt: withExif.meta.takenAt,
+                            lat: withExif.meta.lat,
+                            lng: withExif.meta.lng,
+                            matchedLocation: matched,
+                          });
+                        }
+                      } catch {
+                        // ignore exif extraction errors
+                      }
                     }
                   }}
                 />
               </label>
             </div>
+
+            {photoExifHint && (
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-teal-50 border border-teal-200 px-3 py-2 text-xs text-teal-900">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Sparkles className="w-3.5 h-3.5 text-teal-600 shrink-0" />
+                  <span>
+                    Photo EXIF detected:
+                    {photoExifHint.takenAt && (
+                      <strong className="ml-1">{photoExifHint.takenAt.replace('T', ' ')}</strong>
+                    )}
+                    {photoExifHint.lat !== null && photoExifHint.lng !== null && (
+                      <span className="ml-1 font-mono text-[11px]">
+                        ({photoExifHint.lat.toFixed(4)}, {photoExifHint.lng.toFixed(4)})
+                      </span>
+                    )}
+                    {photoExifHint.matchedLocation && (
+                      <span className="ml-1 font-semibold">
+                        → {photoExifHint.matchedLocation.name}
+                      </span>
+                    )}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (photoExifHint.takenAt) {
+                      setTripDate(photoExifHint.takenAt.slice(0, 16));
+                    }
+                    if (photoExifHint.matchedLocation) {
+                      setLocationId(photoExifHint.matchedLocation.id);
+                    }
+                    setPhotoExifHint(null);
+                  }}
+                  className="font-bold text-teal-700 hover:text-teal-950 bg-white border border-teal-300 px-2.5 py-1 rounded-lg cursor-pointer"
+                >
+                  Apply to Session
+                </button>
+              </div>
+            )}
 
             {(existingImages.length > 0 || pendingFiles.length > 0) && (
               <div className="flex flex-wrap gap-3 pt-1">

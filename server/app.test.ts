@@ -71,6 +71,7 @@ describe('RiverBeat API & SQLite Database', () => {
         body: JSON.stringify({
           description: 'Morning Euro-Nymphing Session at Hirschdale',
           trip_date: '2026-06-18T07:30',
+          duration_minutes: 135,
           location_id: loc.id,
           score: 5,
           rig_type: 'Euro / Tight-Line Nymphing',
@@ -97,6 +98,7 @@ describe('RiverBeat API & SQLite Database', () => {
       expect(tripRes.status).toBe(201);
       const trip = await tripRes.json();
       expect(trip.description).toBe('Morning Euro-Nymphing Session at Hirschdale');
+      expect(trip.duration_minutes).toBe(135);
       expect(trip.rig_type).toBe('Euro / Tight-Line Nymphing');
       expect(trip.hatches).toBe('PMD, Golden Stones, BWO');
       expect(trip.water_clarity).toBe('Clear');

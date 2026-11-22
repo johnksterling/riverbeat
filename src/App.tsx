@@ -6,6 +6,8 @@ import {
   BookOpen,
   Bug,
   Calendar,
+  Camera,
+  Clock,
   CloudSun,
   Compass,
   Droplets,
@@ -16,11 +18,13 @@ import {
   LogOut,
   Map as MapIcon,
   MapPin,
+  Play,
   Plus,
   Radio,
   RefreshCw,
   Search,
   Sparkles,
+  Square,
   Thermometer,
   Trash2,
   Waves,
@@ -28,12 +32,36 @@ import {
   X,
 } from 'lucide-react';
 import type { AuthUserInfo, Location, Trip, USGSGaugeInfo } from '../shared/types.ts';
+import {
+  findNearestLocation,
+  formatDuration,
+  formatLocalDateTime,
+  getTimeOfDayLabel,
+} from '../shared/photoSessions.ts';
 import { api, getAuthenticatedMediaUrl } from './api.ts';
 import { StarRating } from './components/StarRating.tsx';
 import { LeafletMap } from './components/LeafletMap.tsx';
 import { LocationModal } from './components/LocationModal.tsx';
-import { TripModal } from './components/TripModal.tsx';
+import { TripModal, type TripPrefillDraft } from './components/TripModal.tsx';
+import { PhotoImportModal } from './components/PhotoImportModal.tsx';
 import { GoogleSignInGate } from './components/GoogleSignInGate.tsx';
+
+const ACTIVE_SESSION_KEY = 'riverbeat_active_session';
+
+interface ActiveFishingSession {
+  startedAt: string; // ISO string
+  locationId: number | null;
+  geoStatus: 'locating' | 'matched' | 'unavailable';
+}
+
+function formatElapsedTimer(ms: number): string {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return h > 0 ? `${pad(h)}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
+}
 
 type ActiveTab = 'trips' | 'locations' | 'map' | 'insights';
 
@@ -84,7 +112,23 @@ export function App() {
   // Modals
   const [tripModalOpen, setTripModalOpen] = useState(false);
   const [editingTrip, setEditingTrip] = useState<Trip | null>(null);
+  const [tripPrefillDraft, setTripPrefillDraft] = useState<TripPrefillDraft | null>(null);
   const [preselectedTripLocationId, setPreselectedTripLocationId] = useState<number | null>(null);
+
+  const [photoImportOpen, setPhotoImportOpen] = useState(false);
+
+  // Quick Start / Stop Fishing Session Timer
+  const [activeSession, setActiveSession] = useState<ActiveFishingSession | null>(() => {
+    try {
+      const raw = localStorage.getItem(ACTIVE_SESSION_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as ActiveFishingSession;
+      return parsed && parsed.startedAt ? parsed : null;
+    } catch {
+      return null;
+    }
+  });
+  const [elapsedMs, setElapsedMs] = useState<number>(0);
 
   const [locationModalOpen, setLocationModalOpen] = useState(false);
   const [editingLocation, setEditingLocation] = useState<Location | null>(null);
@@ -164,6 +208,100 @@ export function App() {
     if (authRequired && !currentUser) return;
     loadTruckeeWatershed();
   }, [loadTruckeeWatershed, authChecking, authRequired, currentUser]);
+
+  useEffect(() => {
+    if (!activeSession) {
+      setElapsedMs(0);
+      return;
+    }
+    const update = () => {
+      setElapsedMs(Date.now() - new Date(activeSession.startedAt).getTime());
+    };
+    update();
+    const timer = window.setInterval(update, 1000);
+    return () => window.clearInterval(timer);
+  }, [activeSession]);
+
+  const persistActiveSession = (next: ActiveFishingSession | null) => {
+    setActiveSession(next);
+    if (next) {
+      localStorage.setItem(ACTIVE_SESSION_KEY, JSON.stringify(next));
+    } else {
+      localStorage.removeItem(ACTIVE_SESSION_KEY);
+    }
+  };
+
+  const handleStartSession = () => {
+    const startedAt = new Date().toISOString();
+    const initial: ActiveFishingSession = {
+      startedAt,
+      locationId: locations[0]?.id ?? null,
+      geoStatus: typeof navigator !== 'undefined' && navigator.geolocation ? 'locating' : 'unavailable',
+    };
+    persistActiveSession(initial);
+
+    if (typeof navigator !== 'undefined' && navigator.geolocation && locations.length > 0) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const nearest = findNearestLocation(
+            pos.coords.latitude,
+            pos.coords.longitude,
+            locations,
+            15
+          );
+          setActiveSession((prev) => {
+            if (!prev || prev.startedAt !== startedAt) return prev;
+            const updated: ActiveFishingSession = {
+              ...prev,
+              locationId: nearest ? nearest.location.id : prev.locationId,
+              geoStatus: nearest ? 'matched' : 'unavailable',
+            };
+            localStorage.setItem(ACTIVE_SESSION_KEY, JSON.stringify(updated));
+            return updated;
+          });
+        },
+        () => {
+          setActiveSession((prev) => {
+            if (!prev || prev.startedAt !== startedAt) return prev;
+            const updated: ActiveFishingSession = { ...prev, geoStatus: 'unavailable' };
+            localStorage.setItem(ACTIVE_SESSION_KEY, JSON.stringify(updated));
+            return updated;
+          });
+        },
+        { enableHighAccuracy: true, timeout: 6000, maximumAge: 60000 }
+      );
+    }
+  };
+
+  const handleStopSession = () => {
+    if (!activeSession) return;
+    const startDate = new Date(activeSession.startedAt);
+    const durationMinutes = Math.max(1, Math.round((Date.now() - startDate.getTime()) / 60000));
+    const matchedBeat = locations.find((l) => l.id === activeSession.locationId);
+    const timeOfDay = getTimeOfDayLabel(startDate);
+    const defaultTitle = matchedBeat
+      ? `${timeOfDay} Session at ${matchedBeat.name}`
+      : `${timeOfDay} Fly-Fishing Session`;
+
+    setEditingTrip(null);
+    setPreselectedTripLocationId(null);
+    setTripPrefillDraft({
+      description: defaultTitle,
+      tripDate: formatLocalDateTime(startDate),
+      durationMinutes,
+      locationId: activeSession.locationId ?? locations[0]?.id ?? null,
+      autoLookupOnMount: true,
+    });
+    persistActiveSession(null);
+    setTripModalOpen(true);
+  };
+
+  const handleDiscardActiveSession = () => {
+    if (elapsedMs > 60000 && !window.confirm('Discard the current active fishing session timer?')) {
+      return;
+    }
+    persistActiveSession(null);
+  };
 
   const handleCheckLiveFlow = async (siteNo: string) => {
     if (!siteNo) return;
@@ -360,7 +498,35 @@ export function App() {
             </nav>
 
             {/* Primary CTA Buttons */}
-            <div className="flex items-center gap-2.5">
+            <div className="flex flex-wrap items-center gap-2">
+              {activeSession ? (
+                <button
+                  type="button"
+                  onClick={handleStopSession}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs sm:text-sm font-bold bg-rose-500 hover:bg-rose-400 text-white shadow-sm transition-colors cursor-pointer animate-pulse"
+                >
+                  <Square className="w-3.5 h-3.5 fill-current" />
+                  Stop ({formatElapsedTimer(elapsedMs)})
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleStartSession}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs sm:text-sm font-bold bg-emerald-500 hover:bg-emerald-400 text-slate-950 shadow-sm transition-colors cursor-pointer"
+                >
+                  <Play className="w-4 h-4 fill-current" />
+                  Start Session
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setPhotoImportOpen(true)}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold bg-white/10 hover:bg-white/20 text-white border border-white/15 transition-colors cursor-pointer"
+                title="Derive fishing sessions from past photos using EXIF date & GPS"
+              >
+                <Camera className="w-4 h-4 text-sky-300" />
+                <span className="hidden sm:inline">Import Photos</span>
+              </button>
               <button
                 type="button"
                 onClick={() => {
@@ -370,16 +536,17 @@ export function App() {
                 className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold bg-white/10 hover:bg-white/20 text-white border border-white/15 transition-colors cursor-pointer"
               >
                 <MapPin className="w-4 h-4 text-teal-300" />
-                + New Beat
+                <span className="hidden md:inline">+ New Beat</span>
               </button>
               <button
                 type="button"
                 onClick={() => {
                   setEditingTrip(null);
+                  setTripPrefillDraft(null);
                   setPreselectedTripLocationId(null);
                   setTripModalOpen(true);
                 }}
-                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs sm:text-sm font-bold bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-sm transition-colors cursor-pointer"
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs sm:text-sm font-bold bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-sm transition-colors cursor-pointer"
               >
                 <Plus className="w-4 h-4 stroke-[2.5]" />
                 Log Session
@@ -405,6 +572,69 @@ export function App() {
 
       {/* Main Content */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
+        {/* Active Start/Stop Fishing Session Banner */}
+        {activeSession && (
+          <section className="rounded-2xl bg-gradient-to-r from-emerald-950 via-teal-900 to-sky-950 text-white p-4 shadow-md border border-emerald-500/30 flex flex-wrap items-center justify-between gap-4">
+            <div className="flex items-center gap-3.5">
+              <div className="w-3 h-3 rounded-full bg-emerald-400 animate-ping shrink-0" />
+              <div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-extrabold uppercase tracking-wider text-emerald-300">
+                    Fishing Session Active
+                  </span>
+                  <span className="font-mono text-lg font-extrabold text-white bg-white/10 px-2.5 py-0.5 rounded-lg">
+                    {formatElapsedTimer(elapsedMs)}
+                  </span>
+                </div>
+                <div className="text-xs text-sky-200 mt-0.5">
+                  Started at{' '}
+                  {new Date(activeSession.startedAt).toLocaleTimeString([], {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  })}
+                  {activeSession.geoStatus === 'locating' && ' • Matching GPS to River Beat...'}
+                  {activeSession.geoStatus === 'matched' && ' • Beat matched via GPS'}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2.5">
+              <select
+                value={activeSession.locationId ?? ''}
+                onChange={(e) => {
+                  const val = e.target.value ? Number(e.target.value) : null;
+                  persistActiveSession({ ...activeSession, locationId: val });
+                }}
+                className="rounded-xl bg-slate-900/70 border border-white/20 text-white text-xs font-semibold px-3 py-2 outline-none focus:border-emerald-400"
+              >
+                {locations.map((loc) => (
+                  <option key={loc.id} value={loc.id}>
+                    {loc.name}
+                  </option>
+                ))}
+              </select>
+
+              <button
+                type="button"
+                onClick={handleStopSession}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs sm:text-sm font-bold bg-rose-500 hover:bg-rose-400 text-white shadow-sm transition-colors cursor-pointer"
+              >
+                <Square className="w-3.5 h-3.5 fill-current" />
+                Stop &amp; Log Session
+              </button>
+
+              <button
+                type="button"
+                onClick={handleDiscardActiveSession}
+                title="Discard active session timer"
+                className="p-2 rounded-xl text-sky-200 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </section>
+        )}
+
         {/* Live Truckee River Watershed USGS Flow Bar */}
         <section className="bg-white rounded-2xl border border-slate-200/90 shadow-xs p-4 space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -644,6 +874,12 @@ export function App() {
                                 <Calendar className="w-3.5 h-3.5 text-sky-600" />
                                 {formatTripDate(trip.trip_date)}
                               </span>
+                              {trip.duration_minutes ? (
+                                <span className="inline-flex items-center gap-1 text-teal-800 bg-teal-50 border border-teal-200/70 px-2 py-0.5 rounded-md">
+                                  <Clock className="w-3 h-3 text-teal-600" />
+                                  {formatDuration(trip.duration_minutes)}
+                                </span>
+                              ) : null}
                               {trip.location_name && (
                                 <button
                                   type="button"
@@ -1242,21 +1478,35 @@ export function App() {
       {tripModalOpen && (
         <TripModal
           initialTrip={editingTrip}
+          prefillDraft={tripPrefillDraft}
           locations={locations}
           preselectedLocationId={preselectedTripLocationId}
           onClose={() => {
             setTripModalOpen(false);
             setEditingTrip(null);
+            setTripPrefillDraft(null);
           }}
           onSaved={async () => {
             setTripModalOpen(false);
             setEditingTrip(null);
+            setTripPrefillDraft(null);
             await loadAll();
           }}
           onRequestNewLocation={() => {
             setTripModalOpen(false);
             setEditingLocation(null);
             setLocationModalOpen(true);
+          }}
+        />
+      )}
+
+      {photoImportOpen && (
+        <PhotoImportModal
+          locations={locations}
+          onClose={() => setPhotoImportOpen(false)}
+          onImported={async () => {
+            setPhotoImportOpen(false);
+            await loadAll();
           }}
         />
       )}
