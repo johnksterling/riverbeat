@@ -160,6 +160,10 @@ export function createApp(db: DatabaseSync, customAuthConfig?: AuthConfig) {
         id: tripId,
         description: String(row.description ?? ''),
         trip_date: String(row.trip_date ?? ''),
+        duration_minutes:
+          row.duration_minutes !== null && row.duration_minutes !== undefined
+            ? Number(row.duration_minutes)
+            : null,
         location_id: Number(row.location_id),
         location_name: row.location_name ? String(row.location_name) : undefined,
         location_lat: row.location_lat !== undefined ? Number(row.location_lat) : undefined,
@@ -436,6 +440,7 @@ export function createApp(db: DatabaseSync, customAuthConfig?: AuthConfig) {
     const {
       description,
       trip_date,
+      duration_minutes = null,
       location_id,
       score = 3,
       comments = '',
@@ -468,19 +473,22 @@ export function createApp(db: DatabaseSync, customAuthConfig?: AuthConfig) {
     }
 
     const boundedScore = Math.min(5, Math.max(0, Math.round(Number(score) || 0)));
+    const parsedDuration = parseOptionalNumber(duration_minutes);
+    const normalizedDuration = parsedDuration !== null ? Math.max(0, Math.round(parsedDuration)) : null;
 
     const result = db
       .prepare(
         `INSERT INTO trips (
-          description, trip_date, location_id, score, comments,
+          description, trip_date, duration_minutes, location_id, score, comments,
           rig_type, hatches, water_clarity,
           river_flow_cfs, gauge_height_ft, water_temp_f,
           weather_summary, air_temp_f, wind_mph, barometric_pressure
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         description.trim(),
         trip_date.trim(),
+        normalizedDuration,
         locId,
         boundedScore,
         String(comments).trim(),
@@ -517,6 +525,7 @@ export function createApp(db: DatabaseSync, customAuthConfig?: AuthConfig) {
     const {
       description,
       trip_date,
+      duration_minutes = null,
       location_id,
       score = 3,
       comments = '',
@@ -549,10 +558,12 @@ export function createApp(db: DatabaseSync, customAuthConfig?: AuthConfig) {
     }
 
     const boundedScore = Math.min(5, Math.max(0, Math.round(Number(score) || 0)));
+    const parsedDuration = parseOptionalNumber(duration_minutes);
+    const normalizedDuration = parsedDuration !== null ? Math.max(0, Math.round(parsedDuration)) : null;
 
     db.prepare(
       `UPDATE trips SET
-        description = ?, trip_date = ?, location_id = ?, score = ?, comments = ?,
+        description = ?, trip_date = ?, duration_minutes = ?, location_id = ?, score = ?, comments = ?,
         rig_type = ?, hatches = ?, water_clarity = ?,
         river_flow_cfs = ?, gauge_height_ft = ?, water_temp_f = ?,
         weather_summary = ?, air_temp_f = ?, wind_mph = ?, barometric_pressure = ?
@@ -560,6 +571,7 @@ export function createApp(db: DatabaseSync, customAuthConfig?: AuthConfig) {
     ).run(
       description.trim(),
       trip_date.trim(),
+      normalizedDuration,
       locId,
       boundedScore,
       String(comments).trim(),

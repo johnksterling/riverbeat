@@ -35,6 +35,7 @@ export interface Trip {
   id: number;
   description: string;
   trip_date: string; // ISO date or datetime string YYYY-MM-DDTHH:mm
+  duration_minutes?: number | null;
   location_id: number;
   location_name?: string;
   location_lat?: number;

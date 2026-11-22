@@ -41,6 +41,7 @@ export function initDatabase(dbPath?: string): DatabaseSync {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       description TEXT NOT NULL,
       trip_date TEXT NOT NULL,
+      duration_minutes INTEGER,
       location_id INTEGER NOT NULL,
       score INTEGER NOT NULL DEFAULT 3,
       comments TEXT NOT NULL DEFAULT '',
@@ -91,6 +92,9 @@ export function initDatabase(dbPath?: string): DatabaseSync {
   }
   if (!colNames.has('water_clarity')) {
     db.exec("ALTER TABLE trips ADD COLUMN water_clarity TEXT NOT NULL DEFAULT 'Clear'");
+  }
+  if (!colNames.has('duration_minutes')) {
+    db.exec('ALTER TABLE trips ADD COLUMN duration_minutes INTEGER');
   }
 
   if (resolvedPath !== ':memory:') {
